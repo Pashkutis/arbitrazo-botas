@@ -1,82 +1,161 @@
-import asyncio
-import logging
+!pip install python-telegram-bot yfinance nest_asyncio pytz
+
 import yfinance as yf
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from datetime import datetime
+from telegram import Update, Bot
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import asyncio
+from pytz import timezone
+import nest_asyncio
+
+nest_asyncio.apply()
 
 TOKEN = '7751395968:AAFe1pThvDb8EH7mubKRirj5koWMR5X2uns'
 CHAT_ID = '6652798946'
+
 kapitalas = 300
 norimas_pelnas = 10
-intervalas_rinkos = 15  # minutėmis
-
-logging.basicConfig(level=logging.INFO)
-
-app = Application.builder().token(TOKEN).build()
-
-def gauti_rsi(df, laikotarpis=14):
-    delta = df['Close'].diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ema_up = up.ewm(com=laikotarpis - 1, adjust=False).mean()
-    ema_down = down.ewm(com=laikotarpis - 1, adjust=False).mean()
-    rs = ema_up / ema_down
-    return 100 - (100 / (1 + rs))
-
-async def siusti_signala():
-    df = yf.download(tickers='ETH-USD', period='1d', interval=f'{intervalas_rinkos}m', progress=False)
-    kaina = float(df['Close'].iloc[-1])
-    rsi = float(gauti_rsi(df).iloc[-1])
-
-    if rsi < 30:
-        signalas = f'📉 LAUKTI!\nETH: {kaina:.2f} USD\nRSI: {rsi:.2f}\n🟢 Siunčiama automatiškai.'
-    elif rsi > 70:
-        signalas = f'📈 LAUKTI!\nETH: {kaina:.2f} USD\nRSI: {rsi:.2f}\n🔴 Siunčiama automatiškai.'
-    else:
-        signalas = f'📊 NEUTRALU\nETH: {kaina:.2f} USD\nRSI: {rsi:.2f}\n⚪ Siunčiama automatiškai.'
-
-    await app.bot.send_message(chat_id=CHAT_ID, text=signalas)
-
-async def periodinis_tikrinimas():
-    while True:
-        await siusti_signala()
-        await asyncio.sleep(intervalas_rinkos * 60)
-
-def sukurti_mygtukus():
-    keyboard = [
-        [InlineKeyboardButton("📡 Signalas", callback_data='signalas')],
-        [InlineKeyboardButton("📊 Statistika", callback_data='statistika')],
-        [InlineKeyboardButton("📕 Log", callback_data='log')],
-        [InlineKeyboardButton("⛔ Stop", callback_data='stop')],
-    ]
-    return InlineKeyboardMarkup(keyboard)
+intervalas_rinkos = 15
+pirkimo_kaina = None
+stop_signalas = False
+log_list = []  # <<<< naujas žurnalas
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Botas paleistas ir veikia.\n\nPasirinkite veiksmą:", reply_markup=sukurti_mygtukus())
+    await update.message.reply_text("✅ Botas paleistas ir veikia.")
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def kapitalas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global kapitalas
+    try:
+        kapitalas = float(context.args[0])
+        await update.message.reply_text(f"💵 Kapitalas nustatytas: {kapitalas} USDT")
+    except:
+        await update.message.reply_text("❌ Naudok: /kapitalas 300")
 
-    if query.data == 'signalas':
-        await siusti_signala()
-    elif query.data == 'statistika':
-        await query.edit_message_text(text="📊 Statistika dar ruošiama.")
-    elif query.data == 'log':
-        await query.edit_message_text(text="📕 Log dar ruošiamas.")
-    elif query.data == 'stop':
-        await query.edit_message_text(text="⛔ Botas sustabdytas.")
-        await app.stop()
+async def pelnas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global norimas_pelnas, pirkimo_kaina
+    try:
+        if len(context.args) == 2:
+            norimas_pelnas = float(context.args[0])
+            pirkimo_kaina = float(context.args[1])
+        else:
+            norimas_pelnas = float(context.args[0])
+        
+        if pirkimo_kaina:
+            reikalinga_kaina = pirkimo_kaina + (norimas_pelnas / (kapitalas / pirkimo_kaina))
+            reikalinga_kaina = round(reikalinga_kaina, 2)
+            await update.message.reply_text(
+                f"📌 Norimas pelnas: {norimas_pelnas} USDT\n"
+                f"📈 Pirkimo kaina: {pirkimo_kaina}\n"
+                f"🏁 Reikia parduoti @: {reikalinga_kaina} USDT"
+            )
+        else:
+            await update.message.reply_text(f"💰 Norimas pelnas: {norimas_pelnas} USDT")
+    except:
+        await update.message.reply_text("❌ Naudok: /pelnas 10 arba /pelnas 10 3770")
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(callback_handler))
+async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global stop_signalas
+    stop_signalas = True
+    await update.message.reply_text("🛑 Botas sustabdytas. Nebesiunčia signalų.")
+
+async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await siusti_signal(False)
+
+async def statistika(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global pirkimo_kaina
+    df = yf.download(tickers='ETH-USD', period='1d', interval=f'{intervalas_rinkos}m')
+    price = float(df['Close'].iloc[-1])
+    rsi = skaiciuoti_rsi(df)
+    now = datetime.now(timezone('Europe/Vilnius')).strftime("%Y-%m-%d %H:%M:%S")
+
+    if pirkimo_kaina:
+        reikalinga_kaina = pirkimo_kaina + (norimas_pelnas / (kapitalas / pirkimo_kaina))
+        reikalinga_kaina = round(reikalinga_kaina, 2)
+    else:
+        reikalinga_kaina = "-"
+
+    await update.message.reply_text(
+        f"🔹 Paskutinis signalas:\n"
+        f"📅 Laikas: {now}\n"
+        f"📈 ETH kaina: {price} USD\n"
+        f"🔢 RSI: {rsi:.2f}\n"
+        f"📊 Pirkimo kaina: {pirkimo_kaina if pirkimo_kaina else '-'}\n"
+        f"🌟 Reikia parduoti @: {reikalinga_kaina} USDT"
+    )
+
+async def intervalas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global intervalas_rinkos
+    try:
+        arg = context.args[0].lower().replace("m", "")
+        intervalas_rinkos = int(arg)
+        await update.message.reply_text(f"⏱️ Tikrinimo intervalas nustatytas: {intervalas_rinkos} min.")
+    except:
+        await update.message.reply_text("❌ Naudok: /intervalas 10 arba /intervalas 5m")
+
+async def log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not log_list:
+        await update.message.reply_text("📭 Dar nėra jokių signalų žurnale.")
+        return
+
+    zinute = "📜 Paskutiniai signalai:\n\n"
+    for row in log_list[-5:][::-1]:
+        zinute += f"{row}\n\n"
+
+    await update.message.reply_text(zinute)
+
+def skaiciuoti_rsi(df, period=14):
+    delta = df['Close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1])
+
+async def siusti_signal(automatinis):
+    global pirkimo_kaina, stop_signalas
+    if stop_signalas:
+        return
+
+    df = yf.download(tickers='ETH-USD', period='1d', interval=f'{intervalas_rinkos}m')
+    price = float(df['Close'].iloc[-1])
+    rsi_value = skaiciuoti_rsi(df)
+    now = datetime.now(timezone('Europe/Vilnius')).strftime("%Y-%m-%d %H:%M:%S")
+
+    if rsi_value < 30:
+        pirkimo_kaina = price
+        reikalinga = pirkimo_kaina + (norimas_pelnas / (kapitalas / pirkimo_kaina))
+        reikalinga = round(reikalinga, 2)
+        zinute = f"✅ PIRKTI!\n📈 ETH: {price:.2f} USD\n🔢 RSI: {rsi_value:.2f}\n🌟 Pardavimo kaina: {reikalinga} USDT"
+    elif rsi_value > 70:
+        zinute = f"❌ PARDUOTI!\n📈 ETH: {price:.2f} USD\n🔢 RSI: {rsi_value:.2f}"
+        pirkimo_kaina = None
+    else:
+        zinute = f"🚫 LAUKTI!\n📈 ETH: {price:.2f} USD\n🔢 RSI: {rsi_value:.2f}"
+
+    if automatinis:
+        zinute += "\n🤖 Siunčiama automatiškai."
+
+    log_list.append(f"🕒 {now}\n{zinute}")
+    await Bot(token=TOKEN).send_message(chat_id=CHAT_ID, text=zinute)
+
+async def periodinis_tikrinimas():
+    while not stop_signalas:
+        await siusti_signal(True)
+        await asyncio.sleep(intervalas_rinkos * 60)
 
 async def paleisti():
-    await app.initialize()
-    await app.start()
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("kapitalas", kapitalas_cmd))
+    app.add_handler(CommandHandler("pelnas", pelnas_cmd))
+    app.add_handler(CommandHandler("signal", signal))
+    app.add_handler(CommandHandler("statistika", statistika))
+    app.add_handler(CommandHandler("stop", stop_cmd))
+    app.add_handler(CommandHandler("intervalas", intervalas_cmd))
+    app.add_handler(CommandHandler("log", log_cmd))
     asyncio.create_task(periodinis_tikrinimas())
-    await app.updater.start_polling()
-    await asyncio.Event().wait()
+    await app.run_polling()
 
-if __name__ == "__main__":
-    asyncio.run(paleisti())
+await paleisti()
