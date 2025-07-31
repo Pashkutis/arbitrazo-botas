@@ -1,5 +1,4 @@
-!pip install python-telegram-bot yfinance nest_asyncio pytz
-
+# Importuoti reikalingas bibliotekas
 import yfinance as yf
 from datetime import datetime
 from telegram import Update, Bot
@@ -10,16 +9,19 @@ import nest_asyncio
 
 nest_asyncio.apply()
 
+# Tavo duomenys
 TOKEN = '7751395968:AAFe1pThvDb8EH7mubKRirj5koWMR5X2uns'
 CHAT_ID = '6652798946'
 
+# Pradiniai kintamieji
 kapitalas = 300
 norimas_pelnas = 10
 intervalas_rinkos = 15
 pirkimo_kaina = None
 stop_signalas = False
-log_list = []  # <<<< naujas žurnalas
+log_list = []
 
+# Komandos
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Botas paleistas ir veikia.")
 
